@@ -5,12 +5,14 @@ that can be exposed via A2A protocol.
 """
 
 import os
+import uuid
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 from mask.agent import BaseAgent, load_prompts
+from mask.core.events import AgentEvent
 from mask.core.state import HandoffContext
 
 
@@ -124,6 +126,47 @@ class DeepAgentWrapper(BaseAgent):
         # DeepAgents may not support streaming, return full response
         result = await self.invoke(message, session_id, handoff_context)
         yield result
+
+    async def astream_events(
+        self,
+        message: str,
+        session_id: Optional[str] = None,
+        handoff_context: Optional[HandoffContext] = None,
+    ) -> AsyncIterator[AgentEvent]:
+        """Stream structured events during agent execution.
+
+        Since DeepAgents SDK doesn't natively support event streaming,
+        this implementation wraps the invoke() call and emits events
+        for agent start, the full response, and agent end.
+
+        Args:
+            message: The user message to process.
+            session_id: Optional session ID.
+            handoff_context: Optional handoff context from parent agent.
+
+        Yields:
+            AgentEvent objects representing execution events.
+        """
+        run_id = str(uuid.uuid4())
+
+        # Emit agent start event
+        yield AgentEvent.agent_start(name="DeepAgentWrapper", run_id=run_id)
+
+        try:
+            # Get the full response
+            result = await self.invoke(message, session_id, handoff_context)
+
+            # Emit the response as a text delta
+            if result:
+                yield AgentEvent.text_delta(result, run_id=run_id)
+
+            # Emit agent end event
+            yield AgentEvent.agent_end(name="DeepAgentWrapper", run_id=run_id)
+
+        except Exception as e:
+            # Emit error event
+            yield AgentEvent.error(str(e), run_id=run_id)
+            raise
 
 
 def create_agent(
